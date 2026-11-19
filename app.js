@@ -29,6 +29,7 @@ const ICON = {
   up: pix(['..#..', '.###.', '#####', '..#..', '..#..']),
   down: pix(['..#..', '..#..', '#####', '.###.', '..#..']),
   edit: pix(['....##', '...#.#', '..#.#.', '.#.#..', '##.#..', '###...']),
+  pause: pix(['##.##', '##.##', '##.##', '##.##', '##.##']),
   heart: pix(['.##...##.', '####.####', '#########', '#########', '.#######.', '..#####..', '...###...', '....#....']),
 };
 
@@ -67,6 +68,8 @@ function normalize(d) {
       id: String(h.id), name: String(h.name || 'Habit'),
       target: Math.min(7, Math.max(1, parseInt(h.target, 10) || 7)),
       color: h.color || COLORS[0], created: okKey(h.created) ? h.created : todayKey(),
+      pauses: (Array.isArray(h.pauses) ? h.pauses : []).filter(p => p && okKey(p.from))
+        .map(p => ({ from: p.from, to: okKey(p.to) ? p.to : null })),
     })),
     done: d.done && typeof d.done === 'object' ? d.done : {},
     counters: (Array.isArray(d.counters) ? d.counters : []).filter(c => c && c.id).map(c => ({
@@ -100,6 +103,11 @@ function persistUi() { S.ui = { page: ui.page, sel: ui.sel }; save(); }
 /* ---------- Habit-Logik ---------- */
 const isDone = (h, k) => !!(S.done[h.id] && S.done[h.id][k]);
 const freqLabel = t => t >= 7 ? 'täglich' : `${t}× / Woche`;
+const isPaused = (h, k) => (h.pauses || []).some(p => k >= p.from && (!p.to || k <= p.to));
+const openPause = h => (h.pauses || []).find(p => !p.to);
+const pausedNow = h => isPaused(h, todayKey());
+/** Zählt die Woche für Quoten/Übersichten mit? (nicht vor Anlage, nicht komplett pausiert) */
+const rated = e => e.state !== 'none' && e.state !== 'paused';
 function toggleDone(h, k) {
   const m = S.done[h.id] || (S.done[h.id] = {});
   if (m[k]) delete m[k];
@@ -107,20 +115,23 @@ function toggleDone(h, k) {
   save();
 }
 
-/** Bewertet eine Woche: ok | fail | open | future | none */
+/** Bewertet eine Woche: ok | fail | open | future | paused | none */
 function weekEval(h, mon) {
   const today = todayKey();
   const days = Array.from({ length: 7 }, (_, i) => key(addDays(mon, i)));
   const active = days.filter(k => k >= h.created);
   if (!active.length) return { state: 'none', done: 0, target: 0, missing: 0 };
-  const target = Math.min(h.target, active.length); // angebrochene erste Woche anteilig
+  const live = active.filter(k => !isPaused(h, k));
   const done = days.filter(k => isDone(h, k)).length;
+  if (!live.length) return { state: 'paused', done, target: 0, missing: 0 };
+  // Angebrochene Wochen (Anlage oder Pause) zählen anteilig, z. B. 4×/Woche bei 3 aktiven Tagen → 2
+  const target = Math.min(h.target, Math.ceil(h.target * live.length / 7));
   let state;
   if (done >= target) state = 'ok';
   else if (days[6] < today) state = 'fail';
   else if (days[0] > today) state = 'future';
   else {
-    const left = days.filter(k => k >= today && k >= h.created && !isDone(h, k)).length;
+    const left = days.filter(k => k >= today && k >= h.created && !isPaused(h, k) && !isDone(h, k)).length;
     state = done + left < target ? 'fail' : 'open'; // nicht mehr schaffbar = verfehlt
   }
   return { state, done, target, missing: Math.max(0, target - done) };
@@ -134,7 +145,7 @@ function habitStats(h) {
   const ok = closed.filter(e => e.state === 'ok').length;
   let cur = 0;
   for (let i = ws.length - 1; i >= 0; i--) {
-    if (i === ws.length - 1 && ws[i].state === 'open') continue;
+    if ((i === ws.length - 1 && ws[i].state === 'open') || ws[i].state === 'paused') continue; // Pause unterbricht die Serie nicht
     if (ws[i].state === 'ok') cur++; else break;
   }
   let best = 0, run = 0;
@@ -202,9 +213,10 @@ function renderTracker() {
   const mon = parse(ui.week), today = todayKey(), isCur = ui.week === thisMonday();
   const keys = Array.from({ length: 7 }, (_, i) => key(addDays(mon, i)));
   const evs = S.habits.map(h => weekEval(h, mon));
-  const rel = evs.filter(e => e.state !== 'none');
+  const rel = evs.filter(rated);
   const okN = rel.filter(e => e.state === 'ok').length;
   const failN = rel.filter(e => e.state === 'fail').length;
+  const pauseN = evs.filter(e => e.state === 'paused').length;
   const pct = rel.length ? Math.round(okN / rel.length * 100) : 0;
 
   let grid = `<div class="hc corner"><b>${okN}/${rel.length}</b><span>erfüllt</span></div>`;
@@ -213,18 +225,21 @@ function renderTracker() {
   S.habits.forEach((h, hi) => {
     const e = evs[hi], st = e.state;
     const badge = st === 'none' ? '–'
+      : st === 'paused' ? 'Pause'
       : st === 'ok' ? `${ICON.check} ${e.done}/${e.target}`
       : st === 'fail' ? `${e.done}/${e.target} <em>−${e.missing}</em>`
       : `${e.done}/${e.target}`;
-    grid += `<button class="hc hname st-${st}" data-act="edit-habit" data-id="${h.id}" style="--c:${h.color}" title="${esc(h.name)} bearbeiten">
+    const pNow = pausedNow(h);
+    grid += `<button class="hc hname st-${st} ${pNow ? 'is-paused' : ''}" data-act="edit-habit" data-id="${h.id}" style="--c:${h.color}" title="${esc(h.name)} bearbeiten">
         <span class="nm">${esc(h.name)}</span>
-        <span class="meta"><span class="freq">${freqLabel(h.target)}</span><span class="badge b-${st}">${badge}</span></span></button>`;
+        <span class="meta"><span class="freq">${pNow ? `${ICON.pause} pausiert` : freqLabel(h.target)}</span><span class="badge b-${st}">${badge}</span></span></button>`;
     grid += keys.map(k => {
       const done = isDone(h, k), fut = k > today;
       let cls = '';
       if (done) cls = 'done';
-      else if (fut) cls = 'future';
+      else if (fut) cls = isPaused(h, k) ? 'future paused' : 'future';
       else if (k < h.created) cls = 'pre';
+      else if (isPaused(h, k)) cls = 'paused';
       else if (h.target >= 7 && k < today) cls = 'missed';          // tägliches Habit verpasst
       else if (st === 'fail' && k < today) cls = 'missed-soft';      // Wochenziel verfehlt
       const icon = done ? ICON.check : cls === 'missed' ? ICON.miss : '';
@@ -246,7 +261,7 @@ function renderTracker() {
   <section class="panel">
     <div class="weeksum">
       <div class="meter"><i style="width:${pct}%"></i></div>
-      <span>${okN} von ${rel.length} erfüllt${failN ? ` · <b class="miss-t">${failN} verfehlt</b>` : ''}</span>
+      <span>${okN} von ${rel.length} erfüllt${failN ? ` · <b class="miss-t">${failN} verfehlt</b>` : ''}${pauseN ? ` · ${pauseN} pausiert` : ''}</span>
       ${isCur ? '' : '<button class="btn small" data-act="today">Zur aktuellen Woche</button>'}
     </div>
     <div class="hgrid" id="hgrid">${grid}</div>
@@ -256,6 +271,7 @@ function renderTracker() {
     <span><i class="cell done" style="--c:var(--accent)">${ICON.check}</i>erledigt</span>
     <span><i class="cell missed">${ICON.miss}</i>verpasst (täglich)</span>
     <span><i class="cell missed-soft"></i>Wochenziel verfehlt</span>
+    <span><i class="cell paused"></i>pausiert</span>
     <span><i class="cell is-today"></i>heute</span>
   </div>
   <p class="hint">Wischen oder ← → wechselt die Woche · Habit-Namen antippen zum Bearbeiten · vergangene Tage lassen sich nachtragen.</p>`;
@@ -271,7 +287,7 @@ function renderStrip() {
   let out = '', prevMonth = -1;
   for (let m = start; m <= end; m = addDays(m, 7)) {
     const k = key(m);
-    const evs = S.habits.map(h => weekEval(h, m)).filter(e => e.state !== 'none' && e.state !== 'future');
+    const evs = S.habits.map(h => weekEval(h, m)).filter(e => rated(e) && e.state !== 'future');
     const ok = evs.filter(e => e.state === 'ok').length;
     const fail = evs.some(e => e.state === 'fail');
     const p = evs.length ? ok / evs.length * 100 : 0;
@@ -379,14 +395,14 @@ function statsOverview() {
     let sumOk = 0, sumClosed = 0;
     for (let i = 11; i >= 0; i--) {
       const m = addDays(cm, -7 * i);
-      const evs = S.habits.map(h => weekEval(h, m)).filter(e => e.state !== 'none');
+      const evs = S.habits.map(h => weekEval(h, m)).filter(rated);
       const ok = evs.filter(e => e.state === 'ok').length;
       sumOk += ok;
       sumClosed += evs.filter(e => e.state === 'ok' || e.state === 'fail').length;
       const pct = evs.length ? Math.round(ok / evs.length * 100) : 0;
       items.push({ label: 'KW' + isoWeek(m), value: pct, cls: i === 0 ? 'cur' : '', tip: `KW ${isoWeek(m)}: ${ok} von ${evs.length} Habits erfüllt (${pct} %)${i === 0 ? ' · läuft noch' : ''}` });
     }
-    const nowEv = S.habits.map(h => weekEval(h, cm)).filter(e => e.state !== 'none');
+    const nowEv = S.habits.map(h => weekEval(h, cm)).filter(rated);
     const stats = S.habits.map(h => ({ h, st: habitStats(h) }));
     const bestStreak = stats.reduce((a, b) => (b.st.cur > a.st.cur ? b : a), stats[0]);
     const cTotalToday = S.counters.reduce((s, c) => s + cnt(c, todayKey()), 0);
@@ -403,7 +419,7 @@ function statsOverview() {
       ${stats.map(({ h, st }) => {
         const mini = Array.from({ length: 8 }, (_, i) => `<i class="${weekEval(h, addDays(cm, -7 * (7 - i))).state}"></i>`).join('');
         return `<tr data-act="sel" data-sel="h:${h.id}"><td><span class="namecell" style="--c:${h.color}"><i></i>${esc(h.name)}</span></td>
-          <td>${freqLabel(h.target)}</td><td class="num">${st.rate == null ? '–' : Math.round(st.rate * 100) + ' %'}</td><td class="num">${st.cur}</td><td><span class="mini">${mini}</span></td></tr>`;
+          <td>${pausedNow(h) ? `${ICON.pause} pausiert` : freqLabel(h.target)}</td><td class="num">${st.rate == null ? '–' : Math.round(st.rate * 100) + ' %'}</td><td class="num">${st.cur}</td><td><span class="mini">${mini}</span></td></tr>`;
       }).join('')}</tbody></table></div></section>`;
   }
   if (S.counters.length) {
@@ -419,27 +435,30 @@ function statsOverview() {
 function statsHabit(h) {
   const st = habitStats(h), cm = parse(thisMonday()), today = todayKey();
   const n = [8, 12, 26][ui.range.habit];
-  const txt = { ok: 'erfüllt', fail: 'verfehlt', open: 'läuft noch', none: 'noch nicht angelegt', future: '' };
+  const txt = { ok: 'erfüllt', fail: 'verfehlt', open: 'läuft noch', none: 'noch nicht angelegt', future: '', paused: 'pausiert' };
   const items = [];
   for (let i = n - 1; i >= 0; i--) {
     const m = addDays(cm, -7 * i), ev = weekEval(h, m), kw = isoWeek(m);
     items.push({
       label: 'KW' + kw, value: ev.done, target: ev.target, cls: ev.state,
-      tip: ev.state === 'none' ? `KW ${kw} · ${txt.none}` : `KW ${kw} · ${ev.done}/${ev.target} · ${txt[ev.state]}${ev.state === 'fail' ? ` (−${ev.missing})` : ''}`,
+      tip: ev.state === 'none' || ev.state === 'paused' ? `KW ${kw} · ${txt[ev.state]}` : `KW ${kw} · ${ev.done}/${ev.target} · ${txt[ev.state]}${ev.state === 'fail' ? ` (−${ev.missing})` : ''}`,
     });
   }
   const wdItems = st.wd.map((v, i) => ({ label: DAYS[i], value: v, tip: `${DAYS[i]}: ${v}× erledigt` }));
   const heat = heatmap({
     nWeeks: 26, color: h.color, cellOf: k => {
-      const d = isDone(h, k), miss = !d && h.target >= 7 && k < today && k >= h.created;
-      return { lvl: d ? 4 : 0, cls: miss ? 'miss' : k < h.created ? 'pre' : '', tip: `${fmtDate(k)} · ${d ? 'erledigt' : miss ? 'verpasst' : '–'}` };
+      const d = isDone(h, k), p = isPaused(h, k), miss = !d && !p && h.target >= 7 && k < today && k >= h.created;
+      return {
+        lvl: d ? 4 : 0, cls: miss ? 'miss' : k < h.created ? 'pre' : p && !d ? 'paused' : '',
+        tip: `${fmtDate(k)} · ${d ? 'erledigt' : miss ? 'verpasst' : p ? 'pausiert' : '–'}`,
+      };
     },
   });
   return `<div class="tiles">
       ${tile(st.rate == null ? '–' : Math.round(st.rate * 100) + ' %', 'Erfüllungsquote', `${st.ok} von ${st.closedN} Wochen`)}
       ${tile(st.cur, 'Aktuelle Serie', st.cur === 1 ? 'Woche erfüllt' : 'Wochen in Folge erfüllt')}
       ${tile(st.best, 'Rekord-Serie', 'Wochen am Stück')}
-      ${tile(st.total, 'Gesamt erledigt', 'Ziel: ' + freqLabel(h.target))}
+      ${tile(st.total, 'Gesamt erledigt', pausedNow(h) ? 'aktuell pausiert' : 'Ziel: ' + freqLabel(h.target))}
     </div>
     <section class="panel"><div class="card-h"><h3>Wochen-Verlauf</h3>${rangeSeg('habit', ['8 Wo.', '12 Wo.', '26 Wo.'])}</div>
       ${barChart({ items, max: 7, color: h.color })}
@@ -532,6 +551,18 @@ function move(arr, item, dir) {
 const editRow = `<div class="mrow"><button type="button" class="btn small" data-m="up">${ICON.up} Hoch</button>
   <button type="button" class="btn small" data-m="down">${ICON.down} Runter</button>
   <button type="button" class="btn small danger" data-m="del">Löschen</button></div>`;
+function pauseBox(h) {
+  const p = openPause(h);
+  if (p) {
+    const planned = p.from > todayKey();
+    return `<div class="pausebox on"><span class="pz">${ICON.pause}</span>
+      <span class="ptxt"><b>${planned ? 'Pause geplant' : 'Pausiert'}</b><br>${planned ? 'ab' : 'seit'} ${fmtDate(p.from)}</span>
+      <button type="button" class="btn small primary" data-m="resume">${planned ? 'Abbrechen' : 'Fortsetzen'}</button></div>`;
+  }
+  return `<div class="pausebox"><label class="fl"><span>Pausieren ab</span><input type="date" name="pfrom" value="${todayKey()}"></label>
+      <button type="button" class="btn small" data-m="pause">${ICON.pause} Pausieren</button></div>
+    <p class="hint">Z. B. bei Verletzung oder Krankheit: Pausierte Tage zählen nicht als verpasst, und deine Serie bleibt erhalten.</p>`;
+}
 const footer = `<div class="mfoot"><button type="button" class="btn" data-m="cancel">Abbrechen</button><button type="submit" class="btn primary">Speichern</button></div>`;
 
 function habitModal(h) {
@@ -541,10 +572,22 @@ function habitModal(h) {
     <label class="fl"><span>Name</span><input type="text" name="hname" maxlength="40" placeholder="z. B. Sport, Lesen, Meditation" value="${esc(d.name)}" autocomplete="off"></label>
     <div class="fl"><span>Wie oft pro Woche?</span><div class="seg">${[1, 2, 3, 4, 5, 6, 7].map(n => `<button type="button" data-m="t" data-v="${n}" class="${n === d.target ? 'on' : ''}">${n === 7 ? 'Täglich' : n + '×'}</button>`).join('')}</div></div>
     <div class="fl"><span>Farbe</span>${swatches(d.color)}</div>
-    ${isNew ? '' : editRow + '<p class="hint">Änderst du die Häufigkeit, werden auch vergangene Wochen mit dem neuen Ziel ausgewertet.</p>'}
+    ${isNew ? '' : pauseBox(h) + editRow + '<p class="hint">Änderst du die Häufigkeit, werden auch vergangene Wochen mit dem neuen Ziel ausgewertet.</p>'}
     ${footer}`,
     (m, b, f) => {
-      if (m === 't') { selectIn(f, m, b); d.target = +b.dataset.v; }
+      if (m === 'pause') {
+        const from = f.elements.pfrom.value || todayKey();
+        h.pauses = (h.pauses || []).concat({ from, to: null });
+        save(); closeModal(); render();
+        toast(from > todayKey() ? `Pause ab ${fmtDay(parse(from))} geplant` : 'Habit pausiert – gute Besserung!');
+      }
+      else if (m === 'resume') {
+        const p = openPause(h), yesterday = key(addDays(new Date(), -1));
+        if (p.from > yesterday) h.pauses = h.pauses.filter(x => x !== p); // Pause hat noch nicht begonnen / nur heute
+        else p.to = yesterday;                                                // heute zählt wieder
+        save(); closeModal(); render(); toast('Weiter geht’s!');
+      }
+      else if (m === 't') { selectIn(f, m, b); d.target = +b.dataset.v; }
       else if (m === 'col') { selectIn(f, m, b); d.color = b.dataset.v; }
       else if (m === 'up' || m === 'down') { move(S.habits, h, m === 'up' ? -1 : 1); save(); render(); }
       else if (m === 'del') askConfirm(`„${esc(h.name)}“ mit allen Einträgen löschen?`, 'Löschen', () => {
@@ -772,6 +815,11 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) chec
 
 // Browser bitten, die Daten nicht automatisch zu löschen
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+
+// Offline-Fähigkeit (nur über http/https, nicht bei file://)
+if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+  addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+}
 
 $('#brand').innerHTML = `${ICON.heart}<span>PIXEL<b>HABITS</b></span>`;
 render();

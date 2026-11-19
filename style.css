@@ -56,7 +56,7 @@ button { font: inherit; color: inherit; cursor: pointer; touch-action: manipulat
 .top {
   position: sticky; top: 0; z-index: 10;
   display: flex; align-items: center; flex-wrap: wrap; gap: 12px;
-  padding: 12px max(16px, calc((100% - 980px) / 2));
+  padding: calc(12px + env(safe-area-inset-top)) max(16px, calc((100% - 980px) / 2)) 12px;
   background: var(--bg);
   border-bottom: 3px solid var(--line);
 }
@@ -189,6 +189,13 @@ main { max-width: 980px; margin: 0 auto; padding: 20px 16px 64px; }
   border-color: color-mix(in srgb, var(--miss) 65%, var(--line));
   background: repeating-linear-gradient(45deg, color-mix(in srgb, var(--miss) 16%, transparent) 0 4px, transparent 4px 8px), var(--panel);
 }
+.cell.paused {
+  border-color: var(--muted);
+  background: repeating-linear-gradient(-45deg, var(--soft) 0 2px, transparent 2px 6px), var(--soft2);
+}
+.cell.future.paused { opacity: .6; }
+.b-paused { background: var(--soft); color: var(--muted); }
+.hname.is-paused .nm { color: var(--muted); }
 .cell.is-today { outline: 3px solid var(--accent); outline-offset: 1px; }
 .cell.pop { animation: pop .18s steps(3); }
 @keyframes pop { 50% { transform: scale(1.15); } }
@@ -305,6 +312,7 @@ main { max-width: 980px; margin: 0 auto; padding: 20px 16px 64px; }
 .hx.miss { box-shadow: inset 0 0 0 2px var(--miss); }
 .hx.pre { opacity: .35; }
 .hx.fut { background: transparent; }
+.hx.paused { background: repeating-linear-gradient(-45deg, var(--muted) 0 1px, var(--soft) 1px 4px); opacity: .6; }
 .hx:not(.fut):hover { outline: 2px solid var(--ink); }
 
 /* Übersichtstabellen */
@@ -323,6 +331,7 @@ main { max-width: 980px; margin: 0 auto; padding: 20px 16px 64px; }
 .mini .fail { background: var(--miss); }
 .mini .open { background: var(--panel); border-style: dotted; }
 .mini .none { opacity: .25; }
+.mini .paused { background: repeating-linear-gradient(-45deg, var(--muted) 0 1px, var(--soft) 1px 4px); border-color: var(--muted); }
 
 /* ==========================================================
    Modal, Tooltip, Toast
@@ -350,6 +359,15 @@ dialog::backdrop { background: rgba(20, 15, 30, .55); }
 .mrow { display: flex; flex-wrap: wrap; gap: 8px; }
 .mrow .danger { margin-left: auto; }
 .mcol { display: flex; flex-direction: column; gap: 10px; }
+.pausebox { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; padding: 12px; background: var(--soft2); border: 2px solid var(--line); }
+.pausebox .fl { flex: 1; min-width: 150px; }
+.pausebox .fl input { padding: 7px 8px; font-size: 15px; }
+.pausebox .btn { height: 40px; }
+.pausebox.on { align-items: center; }
+.pausebox .pz { width: 18px; color: var(--muted); }
+.pausebox .pz .px { width: 100%; }
+.ptxt { flex: 1; font-size: 14px; font-weight: 400; color: var(--muted); }
+.ptxt b { color: var(--ink); }
 .mfoot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 4px; }
 
 .tip {
@@ -370,7 +388,7 @@ dialog::backdrop { background: rgba(20, 15, 30, .55); }
   .two { grid-template-columns: 1fr; }
 }
 @media (max-width: 640px) {
-  .top { gap: 10px; padding: 10px 12px; }
+  .top { gap: 10px; padding: calc(10px + env(safe-area-inset-top)) 12px 10px; }
   .tabs { order: 3; width: 100%; }
   .tab { flex: 1; padding: 7px 4px; }
   main { padding: 14px 10px 56px; }
@@ -392,3 +410,6 @@ dialog::backdrop { background: rgba(20, 15, 30, .55); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* Pause-Icon im Text */
+.freq .px, .tbl td .px { display: inline-block; width: 8px; margin-right: 3px; vertical-align: -1px; }
