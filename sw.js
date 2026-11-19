@@ -1,38 +1,79 @@
-/* Pixel Habits – Service Worker für Offline-Nutzung.
-   App-Dateien: erst Netz (damit Updates sofort ankommen), offline aus dem Cache.
-   Schrift von Google Fonts: einmal laden, dann aus dem Cache. */
-const CACHE = 'pixelhabits-v2';
-const APP = ['./', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest',
-  'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
+// Pixel Habits – Service Worker.
+// App-Dateien cache-first aus versioniertem Cache, Google Fonts aus eigenem Cache.
+// Bei Releases VERSION erhöhen (muss zu APP_VERSION in app.js passen).
+//
+// Update-Fluss (wie bei Wurzelwerk): Ein neuer SW lädt seinen Cache vollständig und wartet.
+// Die Seite zeigt „Neue Version verfügbar – Neu laden“; Antippen schickt
+// {type: 'SKIP_WAITING'} → aktivieren → die Seite lädt neu (controllerchange).
+// Beim nächsten Kaltstart aktiviert app.js einen wartenden SW automatisch.
+// Alle Daten liegen in localStorage → kein Datenverlust beim Neuladen.
+// Ausnahme: Läuft noch die allererste Version (Cache „pixelhabits-v2“, kennt keine
+// Update-Meldung), aktiviert sich der neue SW einmalig sofort.
+const VERSION = '1.1.0';
+const CACHE = 'pixelhabits-' + VERSION;
+const FONTS = 'pixelhabits-fonts';
 
-self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(APP)).then(() => self.skipWaiting()));
+const SHELL = [
+  './',
+  'index.html',
+  'style.css',
+  'app.js',
+  'manifest.webmanifest',
+  'icons/icon-192.png',
+  'icons/icon-512.png',
+  'icons/icon-maskable-512.png',
+  'icons/apple-touch-icon.png',
+];
+
+self.addEventListener('install', (event) => {
+  event.waitUntil((async () => {
+    const cache = await caches.open(CACHE);
+    await cache.addAll(SHELL.map((u) => new Request(u, { cache: 'reload' })));
+    if ((await caches.keys()).includes('pixelhabits-v2')) await self.skipWaiting();
+  })());
 });
 
-self.addEventListener('activate', e => {
-  e.waitUntil(caches.keys()
-    .then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
-    .then(() => self.clients.claim()));
+self.addEventListener('message', (event) => {
+  if (event.data?.type === 'SKIP_WAITING') event.waitUntil(self.skipWaiting());
 });
 
-self.addEventListener('fetch', e => {
-  const req = e.request;
+self.addEventListener('activate', (event) => {
+  event.waitUntil((async () => {
+    for (const k of await caches.keys()) {
+      if (k.startsWith('pixelhabits-') && k !== CACHE && k !== FONTS) await caches.delete(k);
+    }
+    await self.clients.claim();
+  })());
+});
+
+self.addEventListener('fetch', (event) => {
+  const req = event.request;
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
 
+  // Pixel-Schrift: einmal laden, danach aus dem Cache (auch offline)
   if (url.hostname === 'fonts.googleapis.com' || url.hostname === 'fonts.gstatic.com') {
-    e.respondWith(caches.match(req).then(hit => hit || fetch(req).then(res => {
-      const copy = res.clone();
-      caches.open(CACHE).then(c => c.put(req, copy));
+    event.respondWith((async () => {
+      const cache = await caches.open(FONTS);
+      const hit = await cache.match(req);
+      if (hit) return hit;
+      const res = await fetch(req);
+      if (res.ok) cache.put(req, res.clone());
       return res;
-    })));
+    })());
     return;
   }
 
   if (url.origin !== location.origin) return;
-  e.respondWith(fetch(req).then(res => {
-    if (res.ok) { const copy = res.clone(); caches.open(CACHE).then(c => c.put(req, copy)); }
-    return res;
-  }).catch(() => caches.match(req, { ignoreSearch: true })
-    .then(hit => hit || (req.mode === 'navigate' ? caches.match('index.html') : undefined))));
+  event.respondWith((async () => {
+    const cache = await caches.open(CACHE);
+    const hit = await cache.match(req, { ignoreSearch: true });
+    if (hit) return hit;
+    try {
+      return await fetch(req);
+    } catch (e) {
+      if (req.mode === 'navigate') return cache.match('index.html');
+      throw e;
+    }
+  })());
 });

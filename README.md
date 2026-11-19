@@ -24,6 +24,14 @@ Die Seite ist eine installierbare Web-App mit eigenem Icon und funktioniert nach
 iPhone: Safari → *Teilen → Zum Home-Bildschirm*. Das schützt auch die Daten: Safari löscht Speicher von
 Webseiten, die man länger nicht besucht hat – bei Apps auf dem Home-Bildschirm nicht.
 
+## Updates
+
+Neue Versionen lädt die App im Hintergrund und zeigt dann „Neue Version verfügbar → Neu laden“.
+Wer nicht tippt, bekommt die neue Version automatisch beim nächsten Kaltstart. Die Daten bleiben dabei erhalten.
+
+**Beim Veröffentlichen einer Änderung:** `VERSION` in `sw.js` und `APP_VERSION` in `app.js` gleich hochzählen
+(z. B. 1.1.0 → 1.1.1) – sonst bemerkt die installierte App das Update nicht.
+
 ## Daten & Backup
 
 Über **Daten** oben rechts: Backup als JSON exportieren/importieren (auch zum Umziehen auf ein anderes Gerät).

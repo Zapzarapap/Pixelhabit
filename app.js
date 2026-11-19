@@ -3,6 +3,7 @@
    Pixel Habits – alles lokal im Browser (localStorage)
    ========================================================== */
 
+const APP_VERSION = '1.1.0'; // muss zu VERSION in sw.js passen
 const LS_KEY = 'pixelhabits.v1';
 const COLORS = ['#4caf6d', '#3f8fd8', '#e8913a', '#d75f93', '#8a6bd8', '#2fa79c', '#d6ad2b', '#7c8798'];
 const DAYS = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
@@ -640,7 +641,7 @@ function settingsModal() {
       <input type="file" id="importFile" accept="application/json,.json" hidden>
       <button type="button" class="btn danger" data-m="reset">Alle Daten löschen</button>
     </div>
-    <p class="hint">${S.habits.length} Habits · ${S.counters.length} Zähler</p>
+    <p class="hint">${S.habits.length} Habits · ${S.counters.length} Zähler · Version ${APP_VERSION}</p>
     <div class="mfoot"><button type="button" class="btn primary" data-m="cancel">Fertig</button></div>`,
     (m, b, f) => {
       if (m === 'export') exportData();
@@ -694,12 +695,25 @@ function loadDemo() {
 }
 
 /* ---------- Toast & Tooltip ---------- */
-let toastT;
-function toast(msg) {
+let toastT, toastSticky = false;
+/** Kurze Meldung. Mit action ({label, onClick}) bleibt sie stehen, bis man tippt. */
+function toast(msg, action) {
+  if (toastSticky && !action) return; // Update-Hinweis nicht von normalen Meldungen verdrängen
   const t = $('#toast');
-  t.textContent = msg; t.hidden = false;
+  t.textContent = msg;
+  t.classList.toggle('has-action', !!action);
   clearTimeout(toastT);
-  toastT = setTimeout(() => { t.hidden = true; }, 1900);
+  toastSticky = !!action;
+  if (action) {
+    const b = document.createElement('button');
+    b.className = 'btn small primary';
+    b.textContent = action.label;
+    b.addEventListener('click', () => { toastSticky = false; t.hidden = true; action.onClick(); });
+    t.append(' ', b);
+  } else {
+    toastT = setTimeout(() => { t.hidden = true; }, 1900);
+  }
+  t.hidden = false;
 }
 function popAt(id, txt) {
   const card = $(`.ccard[data-cid="${id}"]`);
@@ -816,10 +830,81 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) chec
 // Browser bitten, die Daten nicht automatisch zu löschen
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 
-// Offline-Fähigkeit (nur über http/https, nicht bei file://)
-if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
-  addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+/* ---------- Updates (Service Worker, siehe sw.js) ---------- */
+let reloading = false;
+let wantReload = false; // nur neu laden, wenn der Wechsel angefordert wurde (Start oder „Neu laden“)
+function activateUpdate(w) {
+  if (!w) return;
+  wantReload = true;
+  try { sessionStorage.setItem('ph-update-at', String(Date.now())); } catch (e) { /* egal */ }
+  w.postMessage({ type: 'SKIP_WAITING' });
+}
+function offerUpdate(w) {
+  toast('Neue Version verfügbar', { label: 'Neu laden', onClick: () => activateUpdate(w) });
+}
+function watchUpdates(reg) {
+  const track = w => w && w.addEventListener('statechange', () => {
+    if (w.state === 'installed' && navigator.serviceWorker.controller) offerUpdate(w);
+  });
+  if (reg.waiting && navigator.serviceWorker.controller) offerUpdate(reg.waiting);
+  track(reg.installing);
+  reg.addEventListener('updatefound', () => track(reg.installing));
+  // iOS hält die App lange im Speicher: beim Zurückkehren nach Updates sehen (höchstens alle 10 min)
+  let last = Date.now();
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden || Date.now() - last < 600000) return;
+    last = Date.now();
+    reg.update().catch(() => {});
+  });
+}
+/**
+ * Service Worker registrieren. Wartet beim Start schon eine neue Version, wird sie
+ * gleich aktiviert und die Seite neu geladen (Kaltstart, noch nichts angezeigt) –
+ * so läuft schon der erste Neustart nach einem Update mit der neuen Version.
+ * → true, wenn neu geladen wird (dann nicht weiter starten).
+ */
+async function registerSW() {
+  if (!('serviceWorker' in navigator) || !location.protocol.startsWith('http')) return false;
+  let hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController) { hadController = true; return; } // erster Besuch: SW übernimmt erstmals, kein Update
+    if (reloading) return;
+    if (!wantReload) {
+      // z. B. in einem anderen Fenster aktiviert: nicht ungefragt neu laden
+      toast('Neue Version aktiv', { label: 'Neu laden', onClick: () => location.reload() });
+      return;
+    }
+    reloading = true;
+    location.reload();
+  });
+  if (!navigator.serviceWorker.controller) {
+    // Erster Besuch (bzw. ohne aktiven SW): nicht auf die Registrierung warten
+    navigator.serviceWorker.register('sw.js').then(watchUpdates).catch(() => {});
+    return false;
+  }
+  let reg;
+  try { reg = await navigator.serviceWorker.register('sw.js'); } catch (e) { return false; }
+  let recent = 0;
+  try { recent = Date.now() - Number(sessionStorage.getItem('ph-update-at') || 0); } catch (e) { /* egal */ }
+  if (reg.waiting && navigator.serviceWorker.controller && recent > 15000) {
+    // Nachricht wiederholen, bis der SW übernimmt (sie kann beim Kaltstart verloren gehen);
+    // reagiert er nicht, nach 2,5 s normal weiter starten.
+    const w = reg.waiting;
+    const switched = await new Promise(res => {
+      const iv = setInterval(() => (reg.waiting === w ? w.postMessage({ type: 'SKIP_WAITING' }) : null), 400);
+      const t = setTimeout(() => { clearInterval(iv); wantReload = false; res(false); }, 2500);
+      navigator.serviceWorker.addEventListener('controllerchange', () => { clearInterval(iv); clearTimeout(t); res(true); }, { once: true });
+      activateUpdate(w);
+    });
+    if (switched) return true;
+  }
+  watchUpdates(reg);
+  return false;
 }
 
+/* ---------- Start ---------- */
 $('#brand').innerHTML = `${ICON.heart}<span>PIXEL<b>HABITS</b></span>`;
-render();
+(async () => {
+  if (await registerSW()) return; // lädt gerade mit neuer Version neu
+  render();
+})();
